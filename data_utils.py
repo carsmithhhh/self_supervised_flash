@@ -1,3 +1,4 @@
+from balanced_data_utils import *
 import torch
 from torchvision import transforms
 import random
@@ -31,6 +32,7 @@ class WaveformDataset(Dataset):
         max_hits = max(len(arr) for arr in data['arrival_times'])
         arrival_times = self._pad_sequences(data['arrival_times'], max_hits, pad_value=-1)
         nphotons = self._pad_sequences(data['num_photons'], max_hits, pad_value=0)
+        latest_photons = self._pad_sequences(data['last_phot_arrival'], max_hits, pad_value=-1)
         
         waveforms = np.asarray(data['waveforms'])
         offset = 0
@@ -50,6 +52,7 @@ class WaveformDataset(Dataset):
         label_bins = np.zeros((N, L//10), dtype=np.int32)
         hit_times_list = []
         photon_list = []
+        last_phot_list = []
 
         for i, times in enumerate(arrival_times):
             # Handle different input formats
@@ -62,13 +65,16 @@ class WaveformDataset(Dataset):
             if np.isscalar(times):
                 times = [times]
                 photons = [nphotons[i]]
+                last_photons = [latest_photons[i]]
             else:
                 times = np.asarray(times).flatten()
                 photons = np.asarray(nphotons[i]).flatten()
+                last_photons = np.asarray(latest_photons[i]).flatten()
             
             # Store hit times for this waveform
             hit_times_list.append(times)
             photon_list.append(photons)
+            last_phot_list.append(last_photons)
             
             # Set binary indicators for all flashes in this waveform
             for j, t in enumerate(times):
@@ -77,21 +83,20 @@ class WaveformDataset(Dataset):
                 photon_bin[i, t_idx] = photons[j]
                 
         # Convert to torch tensors
+        self.token_labels = torch.from_numpy(np.array(data['token_labels'])).int()
         self.waveforms = torch.from_numpy(waveforms).float()
         self.arrival_times = torch.from_numpy(arrival_bin).float()  # already 2D: (N, L)
         self.photon_per_times = torch.from_numpy(photon_bin).int()
         self.hit_times_list = hit_times_list
         self.photon_list = photon_list
-        self.token_labels = torch.tensor(data['token_labels']).int()
+        self.last_phot_list = last_phot_list
+        print(f"data keys: {data.keys()}")
 
     def __len__(self):
         return self.waveforms.shape[0]
 
     def __getitem__(self, idx):
-        if self.labels == True:
-            return self.waveforms[idx], self.arrival_times[idx], self.hit_times_list[idx], self.photon_per_times[idx], self.photon_list[idx], self.token_labels[idx]
-        else:
-            return self.waveforms[idx], self.arrival_times[idx], self.hit_times_list[idx], self.photon_per_times[idx], self.photon_list[idx]
+        return self.waveforms[idx], self.arrival_times[idx], self.hit_times_list[idx], self.photon_per_times[idx], self.photon_list[idx], self.last_phot_list[idx], self.token_labels[idx]
         
     def _pad_sequences(self, seq_list, max_len, pad_value=-1):
         """Pad 1D arrays in seq_list to max_len with pad_value."""
@@ -136,7 +141,7 @@ def custom_collate_fn(batch):
         arrival_times: Tensor of shape (batch_size,) or (batch_size, 1)
         hit_times: Tensor of shape (?) with a list of hit times per sample
     """
-    waveforms, arrival_times, hit_times, photon_bins, photon_list = zip(*batch)
+    waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list, token_labels = zip(*batch)
     waveforms = torch.stack(waveforms, dim=0)
 
      # Normalizing waveforms
@@ -154,52 +159,105 @@ def custom_collate_fn(batch):
     hit_times = torch.tensor(hit_times)
     photon_list = [item[4] for item in batch]
     photon_list = torch.tensor(photon_list)
+    last_phot_list = [item[5] for item in batch]
+    last_phot_list = torch.tensor(last_phot_list)
     
-    return waveforms, arrival_times, hit_times, photon_bins, photon_list
+    return waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list
 
-def labelled_collate_fn(batch):
-    """
-    !! Custom collate function for WaveformDataset clustering evaluation.
-    Each item in batch is a tuple:
-    Returns:
-        waveforms: Tensor of shape (batch_size, waveform_length)
-        arrival_times: Tensor of shape (batch_size,) or (batch_size, 1)
-        hit_times: Tensor of shape (?) with a list of hit times per sample
-        token_labels: Tensor of shape (batch_size, waveform_length // 10)
-    """
-    waveforms, arrival_times, hit_times, photon_bins, photon_list, label_list = zip(*batch)
-    waveforms = torch.stack(waveforms, dim=0)
-    token_labels = torch.stack(label_list, dim=0)
+# def labelled_collate_fn(batch):
+#     """
+#     !! Custom collate function for WaveformDataset clustering evaluation.
+#     Each item in batch is a tuple:
+#     Returns:
+#         waveforms: Tensor of shape (batch_size, waveform_length)
+#         arrival_times: Tensor of shape (batch_size,) or (batch_size, 1)
+#         hit_times: Tensor of shape (?) with a list of hit times per sample
+#         token_labels: Tensor of shape (batch_size, waveform_length // 10)
+#     """
+#     waveforms, arrival_times, hit_times, photon_bins, photon_list, label_list = zip(*batch)
+#     waveforms = torch.stack(waveforms, dim=0)
+#     token_labels = torch.stack(label_list, dim=0)
 
-     # Normalizing waveforms
-    waveforms = (waveforms - waveforms.mean(dim=1, keepdim=True)) / (waveforms.std(dim=1, keepdim=True) + 1e-8)
-    waveforms = waveforms.unsqueeze(1)  # add channel dimension [B,1,L]
+#      # Normalizing waveforms
+#     waveforms = (waveforms - waveforms.mean(dim=1, keepdim=True)) / (waveforms.std(dim=1, keepdim=True) + 1e-8)
+#     waveforms = waveforms.unsqueeze(1)  # add channel dimension [B,1,L]
 
-    # for binary classification
-    arrival_times = torch.stack(arrival_times, dim=0)
-    arrival_times = arrival_times.unsqueeze(1) # adding channel dimension
-    photon_bins = torch.stack(photon_bins, dim=0)
-    photon_bins = photon_bins.unsqueeze(1)
+#     # for binary classification
+#     arrival_times = torch.stack(arrival_times, dim=0)
+#     arrival_times = arrival_times.unsqueeze(1) # adding channel dimension
+#     photon_bins = torch.stack(photon_bins, dim=0)
+#     photon_bins = photon_bins.unsqueeze(1)
 
-    # for regression, just use hit times
-    hit_times = [item[2] for item in batch]
-    hit_times = torch.tensor(hit_times)
-    photon_list = [item[4] for item in batch]
-    photon_list = torch.tensor(photon_list)
+#     # for regression, just use hit times
+#     hit_times = [item[2] for item in batch]
+#     hit_times = torch.tensor(hit_times)
+#     photon_list = [item[4] for item in batch]
+#     photon_list = torch.tensor(photon_list)
 
-    return waveforms, arrival_times, hit_times, photon_bins, photon_list, token_labels
+#     return waveforms, arrival_times, hit_times, photon_bins, photon_list, token_labels
+
+# def labelled_collate_fn(batch, norm):
+#     """
+#     Custom collate function for WaveformDataset clustering evaluation.
+#     Each item in batch is a tuple.
+#     """
+#     waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list, label_list = zip(*batch)
+
+#     # Stack fixed-size tensors
+#     waveforms = torch.stack(waveforms, dim=0)
+#     token_labels = torch.stack(label_list, dim=0)
+
+#     # Normalize waveforms
+#     if norm:
+#         waveforms = (waveforms - waveforms.mean(dim=1, keepdim=True)) / (waveforms.std(dim=1, keepdim=True) + 1e-8)
+#         waveforms = waveforms.unsqueeze(1)  # [B,1,L]
+
+#     # Arrival times + photon bins
+#     arrival_times = torch.stack(arrival_times, dim=0).unsqueeze(1)
+#     photon_bins = torch.stack(photon_bins, dim=0).unsqueeze(1)
+
+#     # Variable-length fields: keep as lists of tensors
+#     hit_times = [torch.tensor(ht, dtype=torch.float32) for ht in hit_times]
+#     photon_list = [torch.tensor(pl, dtype=torch.float32) for pl in photon_list]
+#     last_phot_list = [torch.tensor(lp, dtype=torch.float32) for lp in last_phot_list]
+
+#     return waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list, token_labels
+def labelled_collate_fn(norm):
+    def collate(batch):
+        waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list, label_list = zip(*batch)
+
+        waveforms = torch.stack(waveforms, dim=0)
+        token_labels = torch.stack(label_list, dim=0)
+
+        if norm:
+            waveforms = (waveforms - waveforms.mean(dim=1, keepdim=True)) / \
+                         (waveforms.std(dim=1, keepdim=True) + 1e-8)
+        waveforms = waveforms.unsqueeze(1)
+
+        arrival_times = torch.stack(arrival_times, dim=0).unsqueeze(1)
+        photon_bins = torch.stack(photon_bins, dim=0).unsqueeze(1)
+
+        hit_times = [torch.tensor(ht, dtype=torch.float32) for ht in hit_times]
+        photon_list = [torch.tensor(pl, dtype=torch.float32) for pl in photon_list]
+        last_phot_list = [torch.tensor(lp, dtype=torch.float32) for lp in last_phot_list]
+
+        return waveforms, arrival_times, hit_times, photon_bins, photon_list, last_phot_list, token_labels
+    return collate
 
 
-def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, seed=42):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, generator=None, balanced=False, norm=True):
     
     load_wfs = np.load(path, allow_pickle=True)
-    dataset = WaveformDataset(load_wfs.item())
+    full_data = load_wfs.item()
 
-    g = torch.Generator()
-    g.manual_seed(seed)
+    if balanced:
+        dataset = BalancedWaveformDataset(full_data)
+        collate_func = labelled_collate_fn(norm)
+    else:
+        dataset = WaveformDataset(full_data)
+        collate_func = labelled_collate_fn(norm)
+
+    g = generator
 
     total_size = len(dataset)
     val_size = int(total_size * val_ratio)
@@ -212,7 +270,7 @@ def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, seed
         batch_size=batch_size,
         shuffle=True,
         generator=g,
-        collate_fn=custom_collate_fn,
+        collate_fn=collate_func,
         num_workers=0,
         pin_memory=False,
         drop_last=False
@@ -222,7 +280,7 @@ def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, seed
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=custom_collate_fn,
+        collate_fn=collate_func,
         num_workers=0,
         pin_memory=False,
         drop_last=False
@@ -232,7 +290,7 @@ def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, seed
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=custom_collate_fn,
+        collate_fn=collate_func,
         num_workers=0,
         pin_memory=False,
         drop_last=False
@@ -240,34 +298,19 @@ def make_wf_dataloaders(path, batch_size=25, val_ratio=0.1, test_ratio=0.0, seed
 
     return train_loader, val_loader, test_loader
 
-def make_labelled_dataloader(path, batch_size=25, seed=42):
-    load_wfs = np.load(path, allow_pickle=True)
-    dataset = WaveformDataset(load_wfs.item(), labels=True)
-
-    total_size = len(dataset)
-    g = torch.Generator()
-    g.manual_seed(seed)
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        generator=g,
-        collate_fn=labelled_collate_fn,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=False
-    )
-    
-    return loader
-
 class RandomMasking:
-    def __init__(self, masking_p):
-        #: masking_p: fraction of time bins to mask
+    def __init__(self, masking_p, mode='dino'):
         self.masking_p = masking_p
+        self.mode = mode
 
     def __call__(self, waveform_batch):
         B, C, L = waveform_batch.shape
         mask = torch.rand(B, L, device=waveform_batch.device) < self.masking_p
-        mask = mask.unsqueeze(1).expand(-1, C, -1)
-        return waveform_batch, waveform_batch * (~mask)
+        mask = mask.unsqueeze(1).expand(-1, C, -1)  # shape: (B, C, L)
+        
+        if self.mode == 'dino':
+            return waveform_batch, waveform_batch * (~mask)
+        elif self.mode == 'masked_reco':
+            return waveform_batch * (~mask), mask
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
